@@ -1,0 +1,343 @@
+<?php
+$host = 'localhost'; $db = 'map'; $user = 'root'; $pass = '';
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+$message = ''; $action = $_POST['action'] ?? ''; $send_status = '';
+
+try {
+    $pdo = new PDO("mysql:host=$host;dbname=$db;charset=utf8mb4", $user, $pass, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+    ]);
+} catch(PDOException $e) {
+    die("DB Error: " . $e->getMessage());
+}
+
+// Table structure (unchanged)
+function ensureTableStructure($pdo) {
+    $pdo->exec("DROP TABLE IF EXISTS `char_reference`");
+    $pdo->exec("CREATE TABLE `char_reference` (
+        `id` INT PRIMARY KEY AUTO_INCREMENT,
+        `row_num` TINYINT NOT NULL,
+        `col_letter` CHAR(1) NOT NULL,
+        `char_value` CHAR(1) NOT NULL,
+        `linear_index` SMALLINT NOT NULL,
+        UNIQUE KEY `unique_pos` (`row_num`, `col_letter`),
+        KEY `idx_char` (`char_value`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    $charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:,.<>?';
+    $stmt = $pdo->prepare("INSERT INTO `char_reference` (`row_num`, `col_letter`, `char_value`, `linear_index`) VALUES (?, ?, ?, ?)");
+    for($i = 0; $i < strlen($charset); $i++) {
+        $row_num = floor($i / 10);
+        $col_letter = chr((($i % 10) + ord('a')));
+        $stmt->execute([$row_num, $col_letter, $charset[$i], $i]);
+    }
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS `encoded_storage` (
+        `id` INT PRIMARY KEY AUTO_INCREMENT,
+        `data_id` VARCHAR(100) NOT NULL,
+        `hashpassword` VARCHAR(255) NULL,
+        `name` VARCHAR(255) NULL,
+        `url` VARCHAR(500) NULL,
+        `original_text` VARCHAR(255) NULL,
+        `encoded_sequence` TEXT NOT NULL,
+        `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY `unique_data` (`data_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    $stmt = $pdo->query("SHOW COLUMNS FROM `encoded_storage` LIKE 'hashpassword'");
+    if (!$stmt->fetch()) $pdo->exec("ALTER TABLE `encoded_storage` ADD `hashpassword` VARCHAR(255) NULL AFTER `data_id`");
+    $stmt = $pdo->query("SHOW COLUMNS FROM `encoded_storage` LIKE 'name'");
+    if (!$stmt->fetch()) $pdo->exec("ALTER TABLE `encoded_storage` ADD `name` VARCHAR(255) NULL AFTER `hashpassword`");
+    $stmt = $pdo->query("SHOW COLUMNS FROM `encoded_storage` LIKE 'url'");
+    if (!$stmt->fetch()) $pdo->exec("ALTER TABLE `encoded_storage` ADD `url` VARCHAR(500) NULL AFTER `name`");
+}
+
+ensureTableStructure($pdo);
+
+// ENCODE - FULL hashpassword from input
+if($action == 'encode') {
+    $input = trim($_POST['input']);
+    $name = trim($_POST['name'] ?? '');
+    $url = trim($_POST['url'] ?? '');
+    $dataId = trim($_POST['data_id']) ?: 'data_' . time();
+    
+    $hashpassword = password_hash($input, PASSWORD_DEFAULT); // FULL 60-char hash
+    
+    $sequence = '';
+    $stmt = $pdo->prepare("SELECT CONCAT(row_num, col_letter) as pos FROM char_reference WHERE char_value = ?");
+    
+    for($i = 0; $i < strlen($input); $i++) {
+        $char = $input[$i];
+        if(preg_match('/[A-Za-z0-9!@#$%^&*()_+=\[\]{}|;:,.<>?]/', $char)) {
+            $stmt->execute([$char]);
+            $result = $stmt->fetch();
+            if($result) {
+                $sequence .= $result['pos'];
+            }
+        }
+    }
+    
+    if($sequence) {
+        $stmt = $pdo->prepare("REPLACE INTO encoded_storage (data_id, hashpassword, name, url, original_text, encoded_sequence) VALUES (?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$dataId, $hashpassword, $name, $url, $input, $sequence]);
+        
+        $_SESSION['last_encoded_id'] = $dataId;
+        $message = "ENCODED SUCCESS!<br>
+            <strong>ID:</strong> <code style='font-size:18px'>$dataId</code><br>
+            <strong>Input:</strong> '$input'<br>
+            <strong>FULL hashpassword:</strong><br><code style='font-size:12px;color:#dc3545;background:#ffe6e6;padding:8px;border-radius:6px;display:block'>" . htmlspecialchars($hashpassword) . "</code><br>
+            <strong>Encoded:</strong> <code>$sequence</code><br>
+            <strong>Name:</strong> " . htmlspecialchars($name) . "<br>
+            <strong>URL:</strong> " . htmlspecialchars($url);
+    } else {
+        $message = "No valid characters in input";
+    }
+}
+
+// RETRIEVE - FULL hashpassword
+if($action == 'retrieve') {
+    $dataId = trim($_POST['data_id']);
+    $stmt = $pdo->prepare("SELECT hashpassword, name, url, original_text, encoded_sequence, created_at FROM encoded_storage WHERE data_id = ?");
+    $stmt->execute([$dataId]);
+    $result = $stmt->fetch();
+    
+    if($result) {
+        $_SESSION['last_encoded_id'] = $dataId;
+        $message = "RETRIEVED SUCCESS!<br>
+            <strong>ID:</strong> <code>$dataId</code><br>
+            <strong>FULL hashpassword:</strong><br><code style='font-size:12px;color:#dc3545;background:#ffe6e6;padding:8px;border-radius:6px;display:block'>" . htmlspecialchars($result['hashpassword']) . "</code><br>
+            <strong>Name:</strong> <span style='color:#28a745'>" . htmlspecialchars($result['name']) . "</span><br>
+            <strong>URL:</strong> " . ($result['url'] ? "<a href='" . htmlspecialchars($result['url']) . "' target='_blank' style='color:#007cba'>" . htmlspecialchars($result['url']) . "</a>" : 'N/A') . "<br>
+            <strong>Original:</strong> <span style='color:#28a745;font-size:22px;font-family:monospace'>" . htmlspecialchars($result['original_text']) . "</span><br>
+            <strong>Encoded:</strong> <code style='color:#007cba'>" . htmlspecialchars($result['encoded_sequence']) . "</code>";
+    } else {
+        $message = "No data found for ID: <code>$dataId</code>";
+    }
+}
+
+// DECODE (unchanged)
+if($action == 'decode') {
+    $sequence = trim($_POST['sequence']);
+    $text = '';
+    $seq_length = strlen($sequence);
+    
+    for($i = 0; $i < $seq_length; $i += 2) {
+        if($i + 1 < $seq_length) {
+            $row_num = $sequence[$i];
+            $col_letter = $sequence[$i + 1];
+            $stmt = $pdo->prepare("SELECT char_value FROM char_reference WHERE row_num = ? AND col_letter = ?");
+            $stmt->execute([$row_num, $col_letter]);
+            $result = $stmt->fetch();
+            if($result) {
+                $text .= $result['char_value'];
+            }
+        }
+    }
+    $message = "DECODED: <code style='color:#007cba'>$sequence</code> → <strong style='font-size:20px'>$text</strong>";
+}
+
+// FULL EMAIL FUNCTIONALITY RESTORED
+if($action == 'send_email') {
+    $email = trim($_POST['email']);
+    $dataId = trim($_POST['data_id']);
+    
+    $stmt = $pdo->prepare("SELECT hashpassword, name, url, original_text, encoded_sequence FROM encoded_storage WHERE data_id = ?");
+    $stmt->execute([$dataId]);
+    $result = $stmt->fetch();
+    
+    if($result && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        // REAL EMAIL SEND
+        $to = $email;
+        $subject = "TIUK #MAP - Your Encoded Data";
+        $email_body = "=== TIUK #MAP DATA ===\n\n";
+        $email_body .= "ID: $dataId\n";
+        $email_body .= "hashpassword: " . $result['hashpassword'] . "\n";
+        $email_body .= "Name: " . ($result['name'] ?: 'N/A') . "\n";
+        $email_body .= "URL: " . ($result['url'] ?: 'N/A') . "\n";
+        $email_body .= "Original: " . ($result['original_text'] ?: 'N/A') . "\n";
+        $email_body .= "Encoded: " . $result['encoded_sequence'] . "\n\n";
+        $email_body .= "Decode at: http://web2.test/map.php\n================\n";
+        
+        $headers = "MIME-Version: 1.0\r\n";
+        $headers .= "Content-type: text/plain; charset=UTF-8\r\n";
+        $headers .= "From: TIUK MAP <comxtechplugin@gmail.com>\r\n";
+        $headers .= "Reply-To: comxtechplugin@gmail.com\r\n";
+        $headers .= "X-Mailer: PHP/" . phpversion() . "\r\n";
+        
+        // BOTH: Real email + File log
+        if(mail($to, $subject, $email_body, $headers)) {
+            $send_status = "REAL EMAIL SENT to <strong>$email</strong> + LOGGED!<br>
+                <strong>ID:</strong> <code>$dataId</code><br>
+                <strong>FULL hash:</strong> <code style='color:#dc3545'>" . htmlspecialchars($result['hashpassword']) . "</code>";
+            file_put_contents('emails_log.txt', $email_body . "\n--- SENT VIA EMAIL ---\n\n", FILE_APPEND | LOCK_EX);
+        } else {
+            // Fallback log
+            file_put_contents('emails_log.txt', $email_body . "\n--- EMAIL QUEUED ---\n\n", FILE_APPEND | LOCK_EX);
+            $send_status = "EMAIL LOGGED (check spam/server logs) to <strong>$email</strong><br>
+                <strong>ID:</strong> <code>$dataId</code><br>
+                <strong>FULL hash:</strong> <code style='color:#dc3545'>" . htmlspecialchars($result['hashpassword']) . "</code>";
+        }
+    } else {
+        $send_status = "Invalid email or data ID not found";
+    }
+}
+
+$recent = [];
+try {
+    $stmt = $pdo->query("SELECT data_id, hashpassword, COALESCE(name,'') as name, COALESCE(url,'') as url, COALESCE(original_text,'') as original_text, LEFT(encoded_sequence, 20) as seq_preview, created_at FROM encoded_storage ORDER BY id DESC LIMIT 10");
+    $recent = $stmt->fetchAll();
+} catch(Exception $e) {}
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TIUK #MAP</title>
+    <link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Ubuntu', sans-serif; background: linear-gradient(135deg, #f0f0f0 0%, #e0e0e0 100%); color: #1a1a1a; line-height: 1.6; min-height: 100vh; padding: 20px 0; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
+        .header { text-align: center; background: rgba(255,255,255,0.9); padding: 40px 20px; border-radius: 20px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); margin-bottom: 30px; backdrop-filter: blur(10px); }
+        .logo { font-size: 3.5em; font-weight: 700; background: linear-gradient(45deg, #1a1a1a, #333); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 10px; }
+        .subtitle { font-size: 1.3em; color: #444; font-weight: 300; margin-bottom: 20px; }
+        .card { background: rgba(255,255,255,0.95); backdrop-filter: blur(15px); border-radius: 20px; padding: 30px; margin-bottom: 30px; }
+        .card h3 { color: #1a1a1a; font-size: 1.5em; margin-bottom: 20px; }
+        .form-row { display: flex; gap: 15px; align-items: end; flex-wrap: wrap; }
+        .form-row.three-cols { align-items: stretch; }
+        .input-field { flex: 1; padding: 15px 20px; border: 2px solid #ddd; border-radius: 12px; font-size: 16px; font-family: 'Ubuntu', sans-serif; background: rgba(255,255,255,0.8); transition: all 0.3s ease; min-width: 200px; }
+        .input-field:focus { outline: none; border-color: #1a1a1a; box-shadow: 0 0 0 4px rgba(26,26,26,0.1); background: white; }
+        .btn { background: linear-gradient(135deg, #1a1a1a 0%, #333 100%); color: white; border: none; padding: 15px 30px; border-radius: 12px; font-size: 16px; font-weight: 500; font-family: 'Ubuntu', sans-serif; cursor: pointer; transition: all 0.3s ease; white-space: nowrap; }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 10px 30px rgba(26,26,26,0.3); }
+        .btn-retrieve { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .btn-email { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
+        .message { padding: 20px; border-radius: 15px; font-weight: 500; font-size: 16px; line-height: 1.6; margin: 20px 0; backdrop-filter: blur(10px); }
+        .success { background: linear-gradient(135deg, #a8e6cf 0%, #88d8a3 100%); color: #1a1a1a; border: 2px solid #56ab2f; }
+        .email-status { background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%); color: #1a1a1a; border: 2px solid #ff8c42; }
+        .recent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 20px; margin-top: 20px; }
+        .recent-item { background: rgba(255,255,255,0.7); padding: 20px; border-radius: 15px; cursor: pointer; border: 2px solid transparent; transition: all 0.3s ease; }
+        .recent-item:hover { border-color: #1a1a1a; transform: translateY(-2px); }
+        .code { background: rgba(26,26,26,0.9); color: #f0f0f0; padding: 8px 12px; border-radius: 8px; font-family: 'Ubuntu Mono', monospace; font-size: 14px; display: inline-block; }
+        .hash-full { background: rgba(220,53,69,0.1); color: #dc3545; border: 1px solid rgba(220,53,69,0.3); padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; max-height: 60px; overflow: auto; }
+        .id-highlight { background: linear-gradient(135deg, #ffd452 0%, #ff6b6b 100%); padding: 25px; border-radius: 20px; text-align: center; margin: 30px 0; border: 4px solid #ff8c42; box-shadow: 0 10px 30px rgba(255,107,107,0.3); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1 class="logo">TIUK #MAP</h1>
+            <p class="subtitle">Case Sensitive Character Encoding System</p>
+            <p style="color: #666; font-size: 1.1em; font-weight: 500;">60-char hashpassword | REAL EMAIL | All displays FULL hash</p>
+        </div>
+
+        <?php if($message): ?><div class="message success"><?= $message ?></div><?php endif; ?>
+
+        <div class="card">
+            <h3>ENCODE</h3>
+            <form method="POST">
+                <input type="hidden" name="action" value="encode">
+                <div class="form-row three-cols">
+                    <input type="text" name="input" class="input-field" placeholder="Your text" required maxlength="100">
+                    <input type="text" name="name" class="input-field" placeholder="Name">
+                    <input type="url" name="url" class="input-field" placeholder="https://example.com">
+                </div>
+                <div class="form-row">
+                    <input type="text" name="data_id" class="input-field" placeholder="Auto ID if empty">
+                    <button type="submit" class="btn">ENCODE</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h3>RETRIEVE</h3>
+            <form method="POST">
+                <input type="hidden" name="action" value="retrieve">
+                <div class="form-row">
+                    <input type="text" name="data_id" class="input-field" placeholder="Paste ID here" required>
+                    <button type="submit" class="btn btn-retrieve">RETRIEVE</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h3>DECODE SEQUENCE</h3>
+            <form method="POST">
+                <input type="hidden" name="action" value="decode">
+                <div class="form-row">
+                    <input type="text" name="sequence" class="input-field" placeholder="17h2g41a41a41a71i → Hello" required>
+                    <button type="submit" class="btn">DECODE</button>
+                </div>
+            </form>
+        </div>
+
+        <!-- FULL EMAIL FORM RESTORED -->
+        <div class="card">
+            <h3>SEND EMAIL</h3>
+            <form method="POST">
+                <input type="hidden" name="action" value="send_email">
+                <div class="form-row">
+                    <input type="email" name="email" class="input-field" placeholder="user@example.com" required>
+                    <input type="text" name="data_id" class="input-field" placeholder="data_xxxxxx" required>
+                    <button type="submit" class="btn btn-email">SEND EMAIL</button>
+                </div>
+            </form>
+            <?php if($send_status): ?><div class="message email-status"><?= $send_status ?></div><?php endif; ?>
+            <?php if(file_exists('emails_log.txt')): ?>
+                <div style="margin-top: 15px; padding: 15px; background: #e8f4f8; border-radius: 10px; font-size: 14px;">
+                    <strong>Log:</strong> <code>emails_log.txt</code> (<?= number_format(filesize('emails_log.txt')) ?> bytes)
+                </div>
+            <?php endif; ?>
+        </div>
+
+        <?php if($recent): ?>
+        <div class="card">
+            <h3>RECENT</h3>
+            <div class="recent-grid">
+                <?php foreach($recent as $item): ?>
+                <div class="recent-item" onclick="copyId('<?= addslashes($item['data_id']) ?>')">
+                    <div><strong>ID:</strong> <code><?= htmlspecialchars($item['data_id']) ?></code></div>
+                    <div><strong>hashpassword:</strong><br><span class="hash-full"><?= htmlspecialchars($item['hashpassword']) ?></span></div>
+                    <?php if($item['name']): ?><div><strong>Name:</strong> <?= htmlspecialchars($item['name']) ?></div><?php endif; ?>
+                    <?php if($item['url']): ?><div><strong>URL:</strong> <a href="<?= htmlspecialchars($item['url']) ?>" target="_blank"><?= htmlspecialchars($item['url']) ?></a></div><?php endif; ?>
+                    <div><strong>Text:</strong> <?= htmlspecialchars($item['original_text']) ?></div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <?php if(isset($_SESSION['last_encoded_id'])): ?>
+        <div class="id-highlight">
+            <strong>LAST ID:</strong><br>
+            <code onclick="copyId('<?= addslashes($_SESSION['last_encoded_id']) ?>')" style="cursor:pointer;font-size:22px;padding:15px;display:inline-block;font-family:Ubuntu Mono,monospace">
+                <?= htmlspecialchars($_SESSION['last_encoded_id']) ?>
+            </code>
+        </div>
+        <?php endif; ?>
+
+        <div style="text-align: center; padding: 30px 20px; color: #666; font-size: 14px; background: rgba(255,255,255,0.5); border-radius: 15px; margin-top: 30px;">
+            <strong>FULL FEATURES:</strong> 60-char hashpassword | REAL EMAIL | All displays | phpMyAdmin → map.encoded_storage
+        </div>
+    </div>
+
+    <script>
+    function copyId(id) {
+        navigator.clipboard.writeText(id).then(() => {
+            const toast = document.createElement('div');
+            toast.textContent = 'ID COPIED: ' + id.substring(0,20) + '...';
+            toast.style.cssText = `position:fixed;top:20px;right:20px;background:linear-gradient(135deg,#28a745,#20c997);color:white;padding:20px 25px;border-radius:15px;font-family:Ubuntu,sans-serif;font-weight:500;font-size:16px;z-index:9999;box-shadow:0 10px 30px rgba(40,167,69,0.4);backdrop-filter:blur(10px);transform:translateX(400px);transition:all .4s ease;`;
+            document.body.appendChild(toast);
+            setTimeout(()=>toast.style.transform='translateX(0)',100);
+            setTimeout(()=>{toast.style.transform='translateX(400px)';setTimeout(()=>document.body.removeChild(toast),400);},3000);
+        });
+    }
+    </script>
+</body>
+</html>
