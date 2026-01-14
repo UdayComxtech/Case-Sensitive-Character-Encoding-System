@@ -454,16 +454,80 @@ try {
     </div>
 
     <script>
-    function copyId(id) {
-        navigator.clipboard.writeText(id).then(() => {
+        function copyId(id) {
+            // Modern clipboard API (preferred)
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(id).then(() => {
+                    showToast('ID COPIED: ' + id.substring(0,20) + '...');
+                }).catch(() => {
+                    fallbackCopy(id);
+                });
+            } else {
+                fallbackCopy(id);
+            }
+        }
+
+        function fallbackCopy(id) {
+            const textArea = document.createElement('textarea');
+            textArea.value = id;
+            textArea.style.position = 'fixed';
+            textArea.style.left = '-999999px';
+            textArea.style.top = '-999999px';
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            
+            try {
+                const successful = document.execCommand('copy');
+                showToast('ID COPIED: ' + id.substring(0,20) + '...');
+            } catch (err) {
+                console.error('Copy failed:', err);
+                showToast('Copy failed - please select manually');
+            }
+            
+            document.body.removeChild(textArea);
+        }
+
+        function showToast(message) {
             const toast = document.createElement('div');
-            toast.textContent = 'ID COPIED: ' + id.substring(0,20) + '...';
-            toast.style.cssText = `position:fixed;top:20px;right:20px;background:linear-gradient(135deg,#28a745,#20c997);color:white;padding:15px 25px;border-radius:12px;font-family:Ubuntu,sans-serif;font-weight:500;font-size:clamp(14px,3vw,16px);z-index:9999;box-shadow:0 8px 25px rgba(40,167,69,0.4);backdrop-filter:blur(10px);transform:translateX(400px);transition:all .4s ease;min-width:200px;text-align:center;`;
+            toast.textContent = message;
+            Object.assign(toast.style, {
+                position: 'fixed',
+                top: '20px',
+                right: '20px',
+                background: 'linear-gradient(135deg, #28a745, #20c997)',
+                color: 'white',
+                padding: '15px 25px',
+                borderRadius: '12px',
+                fontFamily: 'Ubuntu, sans-serif',
+                fontWeight: '500',
+                fontSize: 'clamp(14px, 3vw, 16px)',
+                zIndex: '9999',
+                boxShadow: '0 8px 25px rgba(40,167,69,0.4)',
+                backdropFilter: 'blur(10px)',
+                transform: 'translateX(400px)',
+                transition: 'all 0.4s ease',
+                minWidth: '200px',
+                textAlign: 'center'
+            });
+            
             document.body.appendChild(toast);
-            setTimeout(()=>toast.style.transform='translateX(0)',100);
-            setTimeout(()=>{toast.style.transform='translateX(400px)';setTimeout(()=>document.body.removeChild(toast),400);},3000);
+            setTimeout(() => toast.style.transform = 'translateX(0)', 100);
+            setTimeout(() => {
+                toast.style.transform = 'translateX(400px)';
+                setTimeout(() => document.body.removeChild(toast), 400);
+            }, 3000);
+        }
+
+        // Auto-copy if LAST ID exists (optional enhancement)
+        document.addEventListener('DOMContentLoaded', function() {
+            const lastIdCode = document.querySelector('.id-highlight code');
+            if (lastIdCode) {
+                lastIdCode.title = 'Click to copy ID';
+            }
         });
-    }
     </script>
+
+
 </body>
 </html>
